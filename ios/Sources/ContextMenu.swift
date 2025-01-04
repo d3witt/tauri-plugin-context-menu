@@ -17,10 +17,8 @@ struct ContextMenuOptions: Decodable {
     var y: Double?
 }
 
-// Require iOS 14+ for the entire class
-@available(iOS 14.0, *)
 class ContextMenuPlugin: Plugin {
-    var currentMenu: UIMenu?
+    var currentMenu: UIAlertController?
     var menuCallback: ((String) -> Void)?
 
     @objc public func popup(_ invoke: Invoke) throws {
@@ -29,58 +27,64 @@ class ContextMenuPlugin: Plugin {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
 
-            // Build the menu
-            let menu = self.createMenu(from: args.items) { selectedId in
+            let alertController = UIAlertController(
+                title: nil, message: nil, preferredStyle: .actionSheet)
+
+            // Add menu items recursively
+            self.addMenuItems(items: args.items, to: alertController) { selectedId in
                 invoke.resolve(["id": selectedId])
             }
 
-            // Create a temporary button to present the menu
-            let button = UIButton(frame: .zero)
-            button.menu = menu
-            button.showsMenuAsPrimaryAction = true
+            // Add cancel action
+            alertController.addAction(UIAlertAction(title: "Cancel", style: .cancel))
 
-            // Attach button to the view, position, and show
+            // Present the alert controller
             if let vc = self.manager.viewController {
-                vc.view.addSubview(button)
-                let x = args.x ?? 0
-                let y = args.y ?? 0
-                button.frame = CGRect(x: x, y: y, width: 1, height: 1)
-                button.sendActions(for: .menuActionTriggered)
-
-                // Remove after a short delay
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                    button.removeFromSuperview()
+                // For iPad, set the source point
+                if let popoverController = alertController.popoverPresentationController {
+                    popoverController.sourceView = vc.view
+                    popoverController.sourceRect = CGRect(
+                        x: args.x ?? 0, y: args.y ?? 0, width: 1, height: 1)
                 }
+
+                vc.present(alertController, animated: true)
             }
         }
     }
 
-    private func createMenu(
-        from items: [MenuItem],
+    private func addMenuItems(
+        items: [MenuItem],
+        to alertController: UIAlertController,
         callback: @escaping (String) -> Void
-    ) -> UIMenu {
-        let menuElements = items.map {
-            createMenuItem(from: $0, callback: callback)
-        }
-        return UIMenu(title: "", children: menuElements)
-    }
+    ) {
+        for item in items {
+            if let subItems = item.subItems, !subItems.isEmpty {
+                // Create a new action for submenus that presents another alert controller
+                let action = UIAlertAction(title: item.label, style: .default) { [weak self] _ in
+                    let subMenu = UIAlertController(
+                        title: nil, message: nil, preferredStyle: .actionSheet)
+                    self?.addMenuItems(items: subItems, to: subMenu, callback: callback)
+                    subMenu.addAction(UIAlertAction(title: "Back", style: .cancel))
 
-    private func createMenuItem(
-        from item: MenuItem,
-        callback: @escaping (String) -> Void
-    ) -> UIMenuElement {
-        if let subItems = item.subItems, !subItems.isEmpty {
-            // Create nested submenu
-            let children = subItems.map { createMenuItem(from: $0, callback: callback) }
-            return UIMenu(title: item.label, children: children)
-        } else {
-            // Single action
-            return UIAction(
-                title: item.label,
-                attributes: item.enabled == false ? .disabled : [],
-                state: item.selected == true ? .on : .off
-            ) { _ in
-                callback(item.id)
+                    if let vc = self?.manager.viewController {
+                        // For iPad, set the source point
+                        if let popoverController = subMenu.popoverPresentationController {
+                            popoverController.sourceView = vc.view
+                            popoverController.sourceRect = vc.view.bounds
+                        }
+
+                        vc.present(subMenu, animated: true)
+                    }
+                }
+                action.isEnabled = item.enabled != false
+                alertController.addAction(action)
+            } else {
+                // Add single action
+                let action = UIAlertAction(title: item.label, style: .default) { _ in
+                    callback(item.id)
+                }
+                action.isEnabled = item.enabled != false
+                alertController.addAction(action)
             }
         }
     }
@@ -89,7 +93,5 @@ class ContextMenuPlugin: Plugin {
 // Tauri requires a top-level C function for plugin init
 @_cdecl("init_plugin_context_menu")
 func initPlugin() -> Plugin {
-    // If you truly only support iOS 14+, just return directly.
-    // If someone runs iOS 13, the app will refuse to install or crash on launch.
     return ContextMenuPlugin()
 }
